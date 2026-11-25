@@ -171,6 +171,8 @@ export default function LiveMeetingPage() {
   const [approvedTaskIds, setApprovedTaskIds] = useState(new Set());
   const [rejectedTaskIds, setRejectedTaskIds] = useState(new Set());
   const [editingTask, setEditingTask] = useState(null);
+  const [speakerMappings, setSpeakerMappings] = useState({});
+  const [isMappingSpeakers, setIsMappingSpeakers] = useState(false);
   const [diagnosticsData, setDiagnosticsData] = useState(null);
   const [isLoadingDiagnostics, setIsLoadingDiagnostics] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
@@ -1405,6 +1407,13 @@ export default function LiveMeetingPage() {
       const formData = new FormData();
       formData.append('file', audioBlob, `meeting_${meetingId || 'session'}.${ext}`);
       formData.append('duration', durationStr || '00:00');
+      const liveAttendeeRefs = [
+        user?.email,
+        ...remotePeers.map((p) => p.email || p.user_id).filter(Boolean)
+      ].filter(Boolean);
+      if (liveAttendeeRefs.length > 0) {
+        formData.append('active_attendee_emails', JSON.stringify(liveAttendeeRefs));
+      }
 
       const targetMid = meetingId || 'session';
       setProcessingStep(3); // Validating audio & running backend pipeline
@@ -1497,6 +1506,23 @@ export default function LiveMeetingPage() {
       setRejectedTaskIds((prev) => new Set([...prev, taskId]));
     } catch (err) {
       alert('Failed to reject task: ' + (err.response?.data?.detail || err.message));
+    }
+  };
+
+  const handleApplySpeakerMappings = async () => {
+    const targetMid = currentMeetingIdRef.current || currentMeetingId;
+    if (!targetMid || Object.keys(speakerMappings).length === 0) return;
+    setIsMappingSpeakers(true);
+    try {
+      await api.post(`/meetings/${targetMid}/map-speakers`, { mappings: speakerMappings });
+      const analysisRes = await api.get(`/meetings/${targetMid}/analysis`);
+      setTranscripts(analysisRes.data.transcript_segments || []);
+      setExtractedTasks(analysisRes.data.extracted_tasks || []);
+      setSpeakerMappings({});
+    } catch (err) {
+      alert('Failed to map speakers: ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setIsMappingSpeakers(false);
     }
   };
 
@@ -2928,6 +2954,39 @@ export default function LiveMeetingPage() {
                         <span className="font-bold text-white">Detected Action Items</span>
                         <span className="text-[11px] text-white/50">Human Approval Required</span>
                       </div>
+
+                      {isLeader && extractedTasks.some((t) => t.needs_speaker_mapping && t.unidentified_speaker) && (
+                        <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2">
+                          <span className="text-[11px] font-bold text-amber-300 block">
+                            Map Unidentified Speakers to Team Members
+                          </span>
+                          {Array.from(new Set(extractedTasks.filter((t) => t.needs_speaker_mapping && t.unidentified_speaker).map((t) => t.unidentified_speaker))).map((spk) => (
+                            <div key={spk} className="flex items-center gap-2">
+                              <span className="text-[11px] font-semibold text-white/80 w-20 shrink-0">{spk}</span>
+                              <select
+                                value={speakerMappings[spk] || ''}
+                                onChange={(e) => setSpeakerMappings((prev) => ({ ...prev, [spk]: e.target.value }))}
+                                className="flex-1 px-2 py-1 rounded-lg bg-[#131417] border border-white/15 text-xs text-white"
+                              >
+                                <option value="">Select team member...</option>
+                                {activeMembers.map((m) => (
+                                  <option key={m.member_id} value={m.member_id}>
+                                    {m.name} ({m.email})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          ))}
+                          <button
+                            type="button"
+                            disabled={isMappingSpeakers || Object.values(speakerMappings).every((v) => !v)}
+                            onClick={handleApplySpeakerMappings}
+                            className="w-full py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-black text-[11px] font-bold cursor-pointer disabled:opacity-50"
+                          >
+                            {isMappingSpeakers ? 'Applying Mapping...' : 'Apply Speaker Mapping'}
+                          </button>
+                        </div>
+                      )}
 
                       {extractedTasks.length > 0 ? (
                         extractedTasks.map((task) => {

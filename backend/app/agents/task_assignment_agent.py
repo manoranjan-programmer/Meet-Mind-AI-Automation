@@ -178,20 +178,28 @@ class TaskAssignmentAgent:
                 ):
                     all_team_members.append(p)
 
-        speaker_map: Dict[str, str] = {}
+        speaker_map: Dict[str, Dict[str, Any]] = {}
         if isinstance(speaker_catalog, dict):
             for spk_id, spk_info in speaker_catalog.items():
-                if isinstance(spk_info, dict):
+                if isinstance(spk_info, dict) and spk_info.get("verified", True):
                     name = spk_info.get("speaker_label") or spk_info.get("suggested_name")
                     if name and name.lower() not in ["unknown speaker", "unknown"]:
-                        speaker_map[spk_id.lower()] = name
+                        speaker_map[spk_id.lower()] = {
+                            "name": name,
+                            "member_id": spk_info.get("member_id"),
+                            "email": spk_info.get("email"),
+                        }
         elif isinstance(speaker_catalog, list):
             for spk_info in speaker_catalog:
-                if isinstance(spk_info, dict):
+                if isinstance(spk_info, dict) and spk_info.get("verified", True):
                     spk_id = spk_info.get("speaker_id", "")
                     name = spk_info.get("speaker_label") or spk_info.get("suggested_name")
                     if spk_id and name and name.lower() not in ["unknown speaker", "unknown"]:
-                        speaker_map[spk_id.lower()] = name
+                        speaker_map[spk_id.lower()] = {
+                            "name": name,
+                            "member_id": spk_info.get("member_id"),
+                            "email": spk_info.get("email"),
+                        }
 
         attending_members: List[Dict[str, Any]] = []
         if selected_participant_ids:
@@ -223,16 +231,20 @@ class TaskAssignmentAgent:
 
         for task in extracted_tasks:
             raw_explicit_owner = task.get("explicit_owner")
+            is_explicit_commitment = bool(task.get("is_explicit_commitment", False))
             required_skills = [s.strip().lower() for s in (task.get("required_skills") or []) if str(s).strip()]
             evidence = task.get("evidence", "")
 
             explicit_owner = raw_explicit_owner
-            if raw_explicit_owner and raw_explicit_owner.lower() in speaker_map:
-                explicit_owner = speaker_map[raw_explicit_owner.lower()]
+            mapped_speaker_meta = speaker_map.get(raw_explicit_owner.lower()) if raw_explicit_owner else None
+            if mapped_speaker_meta:
+                explicit_owner = mapped_speaker_meta["name"]
 
             matched_member: Optional[Dict[str, Any]] = None
             assignment_reason = ""
             confidence_score = 0.0
+            needs_speaker_mapping = False
+            unidentified_speaker: Optional[str] = None
 
             is_generic_speaker = (
                 not explicit_owner
@@ -240,8 +252,24 @@ class TaskAssignmentAgent:
                 or bool(re.match(r"^Speaker\s*\d+$", explicit_owner.strip(), re.IGNORECASE))
             )
 
-            # Priority 1: Explicit verbal acceptance
-            if explicit_owner and not is_generic_speaker:
+            # Priority 1: Explicit verbal acceptance by an identified meeting participant
+            if mapped_speaker_meta and (mapped_speaker_meta.get("member_id") or mapped_speaker_meta.get("email")):
+                matched_member = next(
+                    (
+                        m for m in all_team_members
+                        if (mapped_speaker_meta.get("member_id") and m.get("member_id") == mapped_speaker_meta["member_id"])
+                        or (mapped_speaker_meta.get("email") and m.get("email", "").lower() == mapped_speaker_meta["email"].lower())
+                    ),
+                    None,
+                )
+                if matched_member:
+                    confidence_score = 0.98
+                    assignment_reason = (
+                        f"Explicitly committed by identified speaker {matched_member.get('name')} "
+                        f"({matched_member.get('email')})."
+                    )
+
+            if not matched_member and explicit_owner and not is_generic_speaker:
                 owner_clean = explicit_owner.strip().lower()
                 for m in eligible_candidates:
                     m_name = m.get("name", "").strip().lower()
@@ -258,11 +286,11 @@ class TaskAssignmentAgent:
                         assignment_reason = f"Explicitly accepted and committed by attendee {m.get('name')} in meeting dialogue."
                         break
 
-            # Single-member verbal commitment rule
+            # Single-member verbal commitment rule (only when 1 authenticated participant was in the call)
             if not matched_member and is_single_member_session and sole_attendee:
-                has_commitment = bool(
+                has_commitment = is_explicit_commitment or bool(
                     re.search(
-                        r"\b(?:I will|I'll|I can handle|I am going to|I'll do|I can do|I will develop|I'll build|I will build)\b",
+                        r"\b(?:I will|I'll|I can handle|I am going to|I'll do|I can do|I will develop|I'll build|I will build|I can take care)\b",
                         evidence,
                         re.IGNORECASE,
                     )
@@ -270,7 +298,7 @@ class TaskAssignmentAgent:
                 if has_commitment or (explicit_owner and explicit_owner.lower() in ["speaker 1", sole_attendee.get("name", "").lower()]):
                     matched_member = sole_attendee
                     confidence_score = 0.95
-                    assignment_reason = f"Single workspace attendee {sole_attendee.get('name')} explicitly committed to this deliverable."
+                    assignment_reason = f"Single meeting participant {sole_attendee.get('name')} explicitly committed to this deliverable."
 
             # Priority 2: Directed assignment with verbal agreement
             if not matched_member and not is_single_member_session:
@@ -285,8 +313,14 @@ class TaskAssignmentAgent:
                             assignment_reason = f"Directed assignment to {m.get('name')} confirmed during conversation."
                             break
 
-            # Priority 3: Weighted Semantic Skill, Role, Availability & Workload Matching
-            if not matched_member and skill_pool:
+            # If an unverified speaker (e.g. Speaker 1) explicitly committed, DO NOT override with skill guessing;
+            # flag for Team Leader speaker-to-member mapping instead.
+            if not matched_member and is_explicit_commitment and is_generic_speaker and raw_explicit_owner:
+                needs_speaker_mapping = True
+                unidentified_speaker = raw_explicit_owner
+
+            # Priority 3: Weighted Semantic Skill, Role, Availability & Workload Matching (only when no explicit owner committed)
+            if not matched_member and not needs_speaker_mapping and skill_pool:
                 scored_candidates = []
                 for m in skill_pool:
                     if str(m.get("availability") or "").strip().lower() in ("unavailable", "offline"):
@@ -326,11 +360,17 @@ class TaskAssignmentAgent:
                 assigned_role = "Unassigned"
                 assigned_email = ""
                 confidence_score = 0.0
-                req_str = ", ".join(task.get("required_skills") or []) or "unspecified skills"
-                assignment_reason = (
-                    f"No active workspace member matched required skills ({req_str}) or explicit commitment. "
-                    "Marked as Unassigned for Team Leader review."
-                )
+                if needs_speaker_mapping and unidentified_speaker:
+                    assignment_reason = (
+                        f"'{unidentified_speaker}' explicitly committed to this task, but could not be mapped to a registered "
+                        "participant. Please map this speaker to a team member."
+                    )
+                else:
+                    req_str = ", ".join(task.get("required_skills") or []) or "unspecified skills"
+                    assignment_reason = (
+                        f"No active workspace member matched required skills ({req_str}) or explicit commitment. "
+                        "Marked as Unassigned for Team Leader review."
+                    )
 
             assigned_tasks.append({
                 "title": task.get("title"),
@@ -349,6 +389,8 @@ class TaskAssignmentAgent:
                 "assigned_member_email": assigned_email,
                 "confidence_score": confidence_score,
                 "assignment_reason": assignment_reason,
+                "needs_speaker_mapping": needs_speaker_mapping,
+                "unidentified_speaker": unidentified_speaker,
             })
 
         duration_sec = round(time.time() - start_time, 3)

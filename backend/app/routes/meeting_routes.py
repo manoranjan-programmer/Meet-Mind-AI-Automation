@@ -403,6 +403,7 @@ async def complete_meeting_endpoint(
     meeting_id: str,
     file: Optional[UploadFile] = File(None),
     duration: Optional[str] = Form(None),
+    active_attendee_emails: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -418,6 +419,16 @@ async def complete_meeting_endpoint(
         file_bytes = await file.read()
         filename = file.filename or "recording.webm"
         content_type = file.content_type
+
+    parsed_attendees = None
+    if active_attendee_emails:
+        try:
+            raw_list = json.loads(active_attendee_emails)
+            if isinstance(raw_list, list):
+                parsed_attendees = [str(x) for x in raw_list if x]
+        except Exception:
+            parsed_attendees = [x.strip() for x in active_attendee_emails.split(",") if x.strip()]
+
     return await MeetingService.complete_meeting_session(
         team_id=team_id,
         meeting_id=meeting_id,
@@ -426,6 +437,24 @@ async def complete_meeting_endpoint(
         filename=filename,
         duration=duration,
         content_type=content_type,
+        active_attendee_emails=parsed_attendees,
+    )
+
+
+@router.post("/{meeting_id}/map-speakers")
+def map_meeting_speakers_endpoint(
+    meeting_id: str,
+    body: dict,
+    current_user: dict = Depends(get_current_user),
+):
+    """Maps unidentified speakers (e.g. Speaker 1) to registered team members and updates pending tasks."""
+    team_id = current_user["team_id"]
+    mappings = body.get("mappings") if isinstance(body, dict) else {}
+    return MeetingService.map_meeting_speakers(
+        team_id=team_id,
+        meeting_id=meeting_id,
+        current_user=current_user,
+        mappings=mappings or {},
     )
 
 

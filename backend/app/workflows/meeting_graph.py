@@ -45,6 +45,8 @@ class MeetingState(TypedDict, total=False):
     host_name: Optional[str]
     selected_participant_ids: Optional[List[str]]
     participants: List[Any]
+    active_attendees: List[Dict[str, Any]]
+    manual_speaker_mappings: Dict[str, str]
     team_lead_email: str
     duration: str
     status: str
@@ -159,8 +161,16 @@ def speaker_analysis_node(state: MeetingState) -> Dict[str, Any]:
     segments = state.get("transcript_segments", [])
     participants = state.get("participants", [])
     host_name = state.get("host_name")
+    active_attendees = state.get("active_attendees")
+    manual_mappings = state.get("manual_speaker_mappings")
 
-    res = DiarizationAgent.execute(segments=segments, participants=participants, host_name=host_name)
+    res = DiarizationAgent.execute(
+        segments=segments,
+        participants=participants,
+        manual_mappings=manual_mappings,
+        host_name=host_name,
+        active_attendees=active_attendees,
+    )
     duration = round(time.time() - t0, 3)
     d_status = res.get("status", "success")
     _log_stage("DIARIZATION_COMPLETED", mid, job_id, "identifying_speakers", d_status, duration, res.get("error"))
@@ -447,6 +457,8 @@ def persist_node(state: MeetingState) -> Dict[str, Any]:
             "assigned_member_role": t.get("assigned_member_role", "Unassigned"),
             "assigned_member_email": t.get("assigned_member_email", ""),
             "assignment_reason": t.get("assignment_reason", ""),
+            "needs_speaker_mapping": bool(t.get("needs_speaker_mapping", False)),
+            "unidentified_speaker": t.get("unidentified_speaker"),
             "status": "To Do",
             "approval_status": "Awaiting Approval",
             "validation_flags": t.get("validation_flags", []),

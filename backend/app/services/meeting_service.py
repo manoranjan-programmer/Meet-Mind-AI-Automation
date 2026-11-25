@@ -197,6 +197,8 @@ class MeetingService:
             "host_name": host_name,
             "selected_participant_ids": meeting.get("selected_participant_ids", []),
             "participants": meeting.get("participants", []),
+            "active_attendees": meeting.get("active_attendees", []),
+            "manual_speaker_mappings": meeting.get("manual_speaker_mappings", {}),
             "team_lead_email": current_user.get("email", meeting.get("team_lead_email", "")),
             "duration": meeting.get("duration", "00:00"),
             "status": "Processing",
@@ -641,6 +643,7 @@ class MeetingService:
         filename: Optional[str] = None,
         duration: Optional[str] = None,
         content_type: Optional[str] = None,
+        active_attendee_emails: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Executes full final analysis, diarization, LangGraph multi-agent pipeline, and persists results."""
         MeetingService.require_meeting_host(team_id, meeting_id, current_user)
@@ -648,6 +651,23 @@ class MeetingService:
         meeting = col.find_one({"team_id": team_id, "meeting_id": meeting_id})
         if not meeting:
             raise HTTPException(status_code=404, detail=f"Meeting '{meeting_id}' not found.")
+
+        # Resolve actual connected live attendees from MongoDB member_profiles
+        if active_attendee_emails is not None:
+            member_col = get_col("member_profiles")
+            clean_refs = [str(e).strip().lower() for e in active_attendee_emails if str(e).strip()]
+            resolved_attendees = []
+            if clean_refs:
+                all_active = list(member_col.find({"team_id": team_id, "account_status": "active"}))
+                for m in all_active:
+                    if (m.get("email") or "").strip().lower() in clean_refs or (m.get("member_id") or "").strip().lower() in clean_refs:
+                        resolved_attendees.append({
+                            "member_id": m.get("member_id"),
+                            "name": m.get("name"),
+                            "email": m.get("email"),
+                            "role": m.get("role", "Member"),
+                        })
+            col.update_one({"_id": meeting["_id"]}, {"$set": {"active_attendees": resolved_attendees}})
 
         has_new_audio = bool(file_bytes and filename)
         if has_new_audio:
@@ -689,6 +709,102 @@ class MeetingService:
         return result
 
     @staticmethod
+    def map_meeting_speakers(
+        team_id: str,
+        meeting_id: str,
+        current_user: dict,
+        mappings: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """
+        Maps unidentified speakers (e.g. 'Speaker 1') to registered workspace members
+        and updates transcript segments and pending tasks with the member's registered email.
+        """
+        MeetingService.require_meeting_host(team_id, meeting_id, current_user)
+        col = get_col("meetings")
+        meeting = col.find_one({"team_id": team_id, "meeting_id": meeting_id})
+        if not meeting:
+            raise HTTPException(status_code=404, detail=f"Meeting '{meeting_id}' not found.")
+
+        member_col = get_col("member_profiles")
+        seg_col = get_col("transcript_segments")
+        tasks_col = get_col("tasks")
+
+        resolved_map: Dict[str, Dict[str, Any]] = {}
+        for spk_id, member_id in (mappings or {}).items():
+            if not spk_id or not member_id:
+                continue
+            member = member_col.find_one({"team_id": team_id, "member_id": member_id})
+            if not member:
+                raise HTTPException(status_code=400, detail=f"Member '{member_id}' not found in workspace.")
+            resolved_map[spk_id] = member
+
+        # Update speaker_catalog on meeting document
+        catalog = list(meeting.get("speaker_catalog") or [])
+        for entry in catalog:
+            sid = entry.get("speaker_id")
+            if sid in resolved_map:
+                m = resolved_map[sid]
+                entry["speaker_label"] = m.get("name")
+                entry["suggested_name"] = m.get("name")
+                entry["member_id"] = m.get("member_id")
+                entry["email"] = m.get("email")
+                entry["verified"] = True
+                entry["confidence"] = 1.0
+
+        manual_names = {sid: m.get("name") for sid, m in resolved_map.items()}
+        col.update_one(
+            {"_id": meeting["_id"]},
+            {"$set": {
+                "speaker_catalog": catalog,
+                "manual_speaker_mappings": {**(meeting.get("manual_speaker_mappings") or {}), **manual_names},
+                "updated_at": datetime.utcnow(),
+            }},
+        )
+
+        # Update transcript segments
+        for sid, m in resolved_map.items():
+            seg_col.update_many(
+                {"team_id": team_id, "meeting_id": meeting_id, "speaker_id": sid},
+                {"$set": {
+                    "speaker_label": m.get("name"),
+                    "suggested_name": m.get("name"),
+                    "member_id": m.get("member_id"),
+                    "email": m.get("email"),
+                    "verified": True,
+                }},
+            )
+
+        # Update unapproved tasks that were committed by the mapped speaker
+        updated_task_count = 0
+        for sid, m in resolved_map.items():
+            res = tasks_col.update_many(
+                {
+                    "team_id": team_id,
+                    "meeting_id": meeting_id,
+                    "unidentified_speaker": sid,
+                    "approval_status": "Awaiting Approval",
+                },
+                {"$set": {
+                    "assigned_member_id": m.get("member_id"),
+                    "assigned_member_name": m.get("name"),
+                    "assigned_member_role": m.get("role", "Member"),
+                    "assigned_member_email": m.get("email", ""),
+                    "confidence_score": 0.98,
+                    "needs_speaker_mapping": False,
+                    "assignment_reason": f"Assigned to mapped speaker {m.get('name')} ({m.get('email')}).",
+                    "updated_at": datetime.utcnow(),
+                }},
+            )
+            updated_task_count += res.modified_count
+
+        return {
+            "status": "success",
+            "meeting_id": meeting_id,
+            "mapped_speakers": manual_names,
+            "tasks_updated": updated_task_count,
+        }
+
+    @staticmethod
     def get_meeting_analysis(team_id: str, meeting_id: str) -> Dict[str, Any]:
         """Retrieves full analysis deliverables, transcript, speakers, and action items."""
         meeting = MeetingService.get_meeting(team_id, meeting_id)
@@ -714,6 +830,8 @@ class MeetingService:
             "status": meeting.get("status", "Completed"),
             "selected_participant_ids": meeting.get("selected_participant_ids", []),
             "participants": meeting.get("participants", []),
+            "active_attendees": meeting.get("active_attendees", []),
+            "manual_speaker_mappings": meeting.get("manual_speaker_mappings", {}),
             "meeting_summary": meeting.get("meeting_summary", meeting.get("summary")),
             "summary": meeting.get("meeting_summary", meeting.get("summary")),
             "discussion_topics": meeting.get("discussion_topics", []),

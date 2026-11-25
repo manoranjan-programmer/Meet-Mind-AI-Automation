@@ -25,6 +25,7 @@ class DiarizationAgent:
         participants: Optional[List[Any]] = None,
         manual_mappings: Optional[Dict[str, str]] = None,
         host_name: Optional[str] = None,
+        active_attendees: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         start_time = time.time()
         logger.info(f"[{DiarizationAgent.NAME}] Running diarization for {len(segments)} segments")
@@ -43,27 +44,35 @@ class DiarizationAgent:
             speaker_catalog: Dict[str, Dict[str, Any]] = {}
             speaker_counter = 1
 
+            # Build lookup of registered participants (preferring actual connected live attendees if provided)
+            participant_source = active_attendees if (active_attendees and len(active_attendees) > 0) else (participants or [])
+            participant_by_name: Dict[str, Dict[str, Any]] = {}
             active_names: List[str] = []
-            if participants:
-                for p in participants:
-                    if isinstance(p, dict):
-                        full_name = (p.get("name") or "").strip()
-                    elif isinstance(p, str):
-                        full_name = p.strip()
-                    else:
-                        full_name = ""
+            for p in participant_source:
+                if isinstance(p, dict):
+                    full_name = (p.get("name") or "").strip()
+                    if full_name:
+                        participant_by_name[full_name.lower()] = p
+                        if full_name not in active_names:
+                            active_names.append(full_name)
+                elif isinstance(p, str):
+                    full_name = p.strip()
                     if full_name and full_name not in active_names:
                         active_names.append(full_name)
 
-            # Single-member meeting: either 1 participant or 0 participants with known host_name
+            # Single-speaker live session: only 1 authenticated participant connected (or solo workspace)
             is_single_member = len(active_names) == 1 or (len(active_names) == 0 and bool(host_name and host_name.strip()))
             sole_member_name = active_names[0] if len(active_names) == 1 else (host_name.strip() if host_name else "")
+            sole_meta = participant_by_name.get(sole_member_name.lower(), {}) if sole_member_name else {}
 
             if is_single_member and sole_member_name:
                 speaker_catalog["Speaker 1"] = {
                     "speaker_id": "Speaker 1",
                     "speaker_label": sole_member_name,
                     "suggested_name": sole_member_name,
+                    "member_id": sole_meta.get("member_id"),
+                    "email": sole_meta.get("email"),
+                    "role": sole_meta.get("role"),
                     "verified": True,
                     "confidence": 1.0,
                     "voice_signature": f"VOX-{abs(hash(sole_member_name)) % 10000:04d}",
@@ -76,6 +85,8 @@ class DiarizationAgent:
                         "speaker_id": "Speaker 1",
                         "speaker_label": sole_member_name,
                         "suggested_name": sole_member_name,
+                        "member_id": sole_meta.get("member_id"),
+                        "email": sole_meta.get("email"),
                         "verified": True,
                         "start": seg.get("start", 0.0),
                         "end": seg.get("end", 0.0),
