@@ -327,7 +327,11 @@ export default function TaskDetailsModal({
             {task.assignment_reason && (
               <div className="p-3.5 rounded-xl bg-[#F5F3FF] border border-[#DDD6FE] space-y-1 text-xs">
                 <span className="text-[10px] font-bold text-[#7C3AED] uppercase tracking-wider">
-                  AI Assignment Reason (Confidence: {Math.round((task.confidence_score || 0.95) * 100)}%)
+                  AI Assignment Reason (Confidence: {
+                    !task.assigned_member_id || task.assigned_member_name === 'Unassigned'
+                      ? '0% – No Match'
+                      : `${Math.round((task.confidence_score ?? 0) * 100)}%`
+                  })
                 </span>
                 <p className="text-xs text-[#5B21B6] leading-relaxed">
                   {task.assignment_reason}
