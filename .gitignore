@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/.venv/
+.venv/
+env/
+venv/
+*.env
+*.log
+
+# Node & Frontend
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+.DS_Store
+*.local
+
+# Pytest & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Audio storage
+uploads/
+recordings/
+temp/

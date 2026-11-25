@@ -1,0 +1,56 @@
+services:
+  - type: web
+    name: meetmind-ai-backend
+    runtime: python
+    region: oregon
+    plan: starter
+    rootDir: backend
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: meetmind-audio-storage
+      mountPath: /data/uploads
+      sizeGB: 10
+    envVars:
+      - key: PROJECT_NAME
+        value: MeetMind AI
+      - key: API_PREFIX
+        value: /api
+      - key: MONGODB_URI
+        sync: false
+      - key: DATABASE_NAME
+        value: meetmind_ai
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_EXPIRES_MINUTES
+        value: 1440
+      - key: INVITATION_EXPIRE_HOURS
+        value: 168
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: WHISPER_MODEL
+        value: whisper-large-v3
+      - key: UPLOAD_DIR
+        value: /data/uploads
+      - key: FRONTEND_URL
+        sync: false
+      - key: ZAPIER_TASK_APPROVED_WEBHOOK_URL
+        sync: false
+      - key: ZAPIER_APPROVED_TASK_WEBHOOK_URL
+        sync: false
+      - key: ZAPIER_MEETING_COMPLETED_WEBHOOK_URL
+        sync: false
+      - key: ZAPIER_TASK_COMPLETED_WEBHOOK_URL
+        sync: false
+      - key: ZAPIER_TEAM_MEMBER_ADDED_WEBHOOK_URL
+        sync: false
+      - key: ZAPIER_TEAM_INVITATION_CREATED_WEBHOOK_URL
+        sync: false
+      - key: RTC_STUN_SERVERS
+        value: "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302"
